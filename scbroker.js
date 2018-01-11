@@ -29,6 +29,9 @@ var scErrors = require('sc-errors');
 var BrokerError = scErrors.BrokerError;
 var TimeoutError = scErrors.TimeoutError;
 
+/**
+ * 已经发送 init 命令的客户端
+ */
 var initialized = {};
 
 var sendErrorToMaster = function (err) {
@@ -46,13 +49,25 @@ if (DOWNGRADE_TO_USER && process.setuid) {
   }
 }
 
+/**
+ * 回写数据
+ * @param {ComSocket} socket
+ * @param {*}         object    需要发送的 socket 对象
+ * @param {*}         [options] 发送选项
+ */
 var send = function (socket, object, options) {
   socket.write(object, options);
 };
 
 var dataMap = new FlexiMap();
+/**
+ * socket.channel 映射
+ * @type {{}}
+ */
 var subscriptions = {};
-
+/**
+ * in-memory databases.
+ */
 var dataExpirer = new ExpiryManager();
 
 var addListener = function (socket, channel) {
@@ -108,6 +123,12 @@ var exec = function (query, baseKey) {
 
 var pendingResponseHandlers = {};
 
+/**
+ *
+ * @param ipcAckTimeout
+ * @param callback
+ * @return {*}
+ */
 function createIPCResponseHandler(ipcAckTimeout, callback) {
   var cid = uuid.v4();
 
@@ -136,12 +157,19 @@ function handleMasterResponse(message) {
   }
 }
 
+// --------------------------
+// SCBroker 单例模式, 不能 new 两次
+// --------------------------
 var scBroker;
 
+/**
+ * 通过别的线程启动, var brokerInitOptions = JSON.parse(process.env.brokerInitOptions);
+ * @param options
+ * @constructor
+ */
 function SCBroker(options) {
   if (scBroker) {
-    var err = new BrokerError('Attempted to instantiate a broker which has already been instantiated');
-    throw err;
+    throw new BrokerError('Attempted to instantiate a broker which has already been instantiated');
   }
 
   EventEmitter.call(this);
@@ -172,15 +200,20 @@ SCBroker.prototype._init = function (options) {
   this.options = options;
   this.instanceId = this.options.instanceId;
   this.secretKey = this.options.secretKey;
-  this.ipcAckTimeout = this.options.ipcAckTimeout || DEFAULT_IPC_ACK_TIMEOUT;
+  this.ipcAckTimeout = this.options.ipcAckTimeout || DEFAULT_IPC_ACK_TIMEOUT; // ipc 通信超时时间
 
   this.run();
 
   comServerListen();
 };
 
-SCBroker.prototype.run = function () {};
-
+SCBroker.prototype.run = function () {
+};
+/**
+ * 向 master 进程发送消息
+ * @param data
+ * @param callback
+ */
 SCBroker.prototype.sendToMaster = function (data, callback) {
   var messagePacket = {
     type: 'brokerMessage',
@@ -196,7 +229,11 @@ SCBroker.prototype.sendToMaster = function (data, callback) {
 SCBroker.prototype.exec = function (query, baseKey) {
   return exec(query, baseKey);
 };
-
+/**
+ * 向所有 channel 发送消息
+ * @param channel
+ * @param message
+ */
 SCBroker.prototype.publish = function (channel, message) {
   var sock;
   for (var i in subscriptions) {
@@ -212,7 +249,9 @@ SCBroker.prototype.publish = function (channel, message) {
 var pubSubOptions = {
   batch: true
 };
-
+/**
+ * 可以执行的命令名称
+ */
 var actions = {
   init: function (command, socket) {
     var brokerInfo = {
@@ -220,7 +259,7 @@ var actions = {
       pid: process.pid
     };
     var result = {id: command.id, type: 'response', action: 'init', value: brokerInfo};
-    if (command.secretKey == scBroker.secretKey) {
+    if (command.secretKey === scBroker.secretKey) {
       initialized[socket.id] = {};
     } else {
       var err = new BrokerError('Invalid password was supplied to the broker');
@@ -251,7 +290,12 @@ var actions = {
   },
 
   getExpiry: function (command, socket) {
-    var response = {id: command.id, type: 'response', action: 'getExpiry', value: scBroker.dataExpirer.getExpiry(command.key)};
+    var response = {
+      id: command.id,
+      type: 'response',
+      action: 'getExpiry',
+      value: scBroker.dataExpirer.getExpiry(command.key)
+    };
     send(socket, response);
   },
 
@@ -298,6 +342,11 @@ var actions = {
     send(socket, response);
   },
 
+  /**
+   * 执行
+   * @param command
+   * @param socket
+   */
   exec: function (command, socket) {
     var ret = {id: command.id, type: 'response', action: 'exec'};
     try {
@@ -307,9 +356,9 @@ var actions = {
       }
     } catch (e) {
       var queryErrorPrefix = 'Exception at exec(): ';
-      if (typeof e == 'string') {
+      if (typeof e === 'string') {
         e = queryErrorPrefix + e;
-      } else if (typeof e.message == 'string') {
+      } else if (typeof e.message === 'string') {
         e.message = queryErrorPrefix + e.message;
       }
       ret.error = scErrors.dehydrateError(e, true);
@@ -416,7 +465,13 @@ var actions = {
 
   isSubscribed: function (command, socket) {
     var result = hasListener(socket, command.channel);
-    send(socket, {id: command.id, type: 'response', action: 'isSubscribed', channel: command.channel, value: result}, pubSubOptions);
+    send(socket, {
+      id: command.id,
+      type: 'response',
+      action: 'isSubscribed',
+      channel: command.channel,
+      value: result
+    }, pubSubOptions);
   },
 
   publish: function (command, socket) {
@@ -454,24 +509,34 @@ var genID = function () {
   return curID;
 };
 
+/**
+ * ncom server
+ */
 var comServer = com.createServer();
 var connections = {};
 
+/**
+ * 当客户端连接
+ * @param {ComSocket} sock
+ */
 var handleConnection = function (sock) {
   sock.on('error', sendErrorToMaster);
   sock.id = genID();
 
   connections[sock.id] = sock;
 
+  /**
+   * 接受客户端请求
+   */
   sock.on('message', function (command) {
-    if (initialized.hasOwnProperty(sock.id) || command.action == 'init') {
+    if (initialized.hasOwnProperty(sock.id) || command.action === 'init') {
       try {
         if (actions[command.action]) {
           actions[command.action](command, sock);
         }
       } catch (err) {
         err = scErrors.dehydrateError(err, true);
-        send(sock, {id: command.id, type: 'response', action:  command.action, error: err});
+        send(sock, {id: command.id, type: 'response', action: command.action, error: err});
       }
     } else {
       var err = new BrokerError('Cannot process command before init handshake');
@@ -502,6 +567,7 @@ var handleConnection = function (sock) {
 
 comServer.on('connection', handleConnection);
 
+// Emitted when the server has been bound after calling server.listen().
 comServer.on('listening', function () {
   var brokerInfo = {
     id: BROKER_ID,
@@ -515,7 +581,7 @@ comServer.on('listening', function () {
 
 var comServerListen = function () {
   if (SOCKET_PATH) {
-    if (process.platform != 'win32' && fs.existsSync(SOCKET_PATH)) {
+    if (process.platform !== 'win32' && fs.existsSync(SOCKET_PATH)) {
       fs.unlinkSync(SOCKET_PATH)
     }
     comServer.listen(SOCKET_PATH);
@@ -526,7 +592,7 @@ var comServerListen = function () {
 
 process.on('message', function (m) {
   if (m) {
-    if (m.type == 'masterMessage') {
+    if (m.type === 'masterMessage') {
       if (scBroker) {
         scBroker.emit('masterMessage', m.data, function (err, data) {
           if (m.cid) {
@@ -541,16 +607,19 @@ process.on('message', function (m) {
         });
       } else {
         var errorMessage = 'Cannot send message to broker with id ' + BROKER_ID +
-        ' because the broker was not instantiated';
+          ' because the broker was not instantiated';
         var err = new BrokerError(errorMessage);
         sendErrorToMaster(err);
       }
-    } else if (m.type == 'masterResponse') {
+    } else if (m.type === 'masterResponse') {
       handleMasterResponse(m);
     }
   }
 });
 
+/**
+ * 线程关闭就同时关闭 server
+ */
 var killServer = function () {
   comServer.close(function () {
     process.exit();

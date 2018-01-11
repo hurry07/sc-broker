@@ -13,12 +13,23 @@ var HOST = '127.0.0.1';
 var DEFAULT_CONNECT_RETRY_ERROR_THRESHOLD = 20;
 var DEFAULT_IPC_ACK_TIMEOUT = 10000;
 
+// --------------------------
+// Server
+// --------------------------
+/**
+ * 监听 fork 线程上发起的消息
+ * @param options
+ * @constructor
+ */
 var Server = function (options) {
   EventEmitter.call(this);
   var self = this;
 
   var defaultBrokerControllerPath = __dirname + '/default-broker-controller.js';
 
+  /**
+   * fork 线程参数
+   */
   var serverOptions = {
     id: options.id,
     debug: options.debug,
@@ -32,6 +43,9 @@ var Server = function (options) {
 
   self.options = options;
 
+  /**
+   * 主线程发送消息到 fork 线程时, 如果监听其回调, 则回调函数保存在此.
+   */
   self._pendingResponseHandlers = {};
 
   var stringArgs = JSON.stringify(serverOptions);
@@ -57,11 +71,12 @@ var Server = function (options) {
   // because they have their own --debug-brokers option.
   var execOptions = {
     execArgv: process.execArgv.filter(function (arg) {
-      return arg != '--debug' && arg != '--debug-brk' && arg != '--inspect'
+      return arg !== '--debug' && arg !== '--debug-brk' && arg !== '--inspect'
     }),
     env: {}
   };
 
+  // 复制 env
   Object.keys(process.env).forEach(function (key) {
     execOptions.env[key] = process.env[key];
   });
@@ -74,12 +89,13 @@ var Server = function (options) {
     execOptions.execArgv.push('--inspect=' + options.inspect);
   }
 
+  // https://nodejs.org/api/child_process.html#child_process_child_process_fork_modulepath_args_options
   self._server = fork(serverOptions.brokerControllerPath, [stringArgs], execOptions);
 
   var formatError = function (error) {
-    var err = scErrors.hydrateError(error, true);
-    if (typeof err == 'object') {
-      if (err.name == null || err.name == 'Error') {
+    var err = scErrors.hydrateError(error, true); // 普通对象包装为 Error 对象
+    if (typeof err === 'object') {
+      if (err.name == null || err.name === 'Error') {
         err.name = 'BrokerError';
       }
       err.brokerPid = self._server.pid;
@@ -87,35 +103,42 @@ var Server = function (options) {
     return err;
   };
 
+  // 子线程异常抛出到当前对象上
   self._server.on('error', function (error) {
     var err = formatError(error);
     self.emit('error', err);
   });
 
+  /**
+   * 远程发送消息
+   */
   self._server.on('message', function (value) {
-    if (value.type == 'error') {
+    if (value.type === 'error') {      // 封装为 error 包装
       var err = formatError(value.data);
       self.emit('error', err);
-    } else if (value.type == 'brokerMessage') {
+
+    } else if (value.type === 'brokerMessage') { // 远程发来的消息
       self.emit('brokerMessage', value.brokerId, value.data, function (err, data) {
         if (value.cid) {
           self._server.send({
             type: 'masterResponse',
             error: scErrors.dehydrateError(err, true),
             data: data,
-            rid: value.cid
+            rid: value.cid // callback id?
           });
         }
       });
-    } else if (value.type == 'brokerResponse') {
-      var responseHandler = self._pendingResponseHandlers[value.rid];
+
+    } else if (value.type === 'brokerResponse') { // 当前客户端发送消息的返回结果
+      var responseHandler = self._pendingResponseHandlers[value.rid]; // rid response id? errorid?
       if (responseHandler) {
         clearTimeout(responseHandler.timeout);
         delete self._pendingResponseHandlers[value.rid];
         var properError = scErrors.hydrateError(value.error, true);
         responseHandler.callback(properError, value.data, value.brokerId);
       }
-    } else if (value.type == 'listening') {
+
+    } else if (value.type === 'listening') {
       self.emit('ready', value.data);
     }
   });
@@ -175,6 +198,14 @@ module.exports.createServer = function (options) {
   return new Server(options);
 };
 
+// --------------------------
+// Client
+// --------------------------
+/**
+ * 连接远程
+ * @param options
+ * @constructor
+ */
 var Client = function (options) {
   var self = this;
 
@@ -218,6 +249,7 @@ var Client = function (options) {
     self.connectRetryErrorThreshold = options.connectRetryErrorThreshold;
   }
 
+  // 链接状态
   self.CONNECTED = 'connected';
   self.CONNECTING = 'connecting';
   self.DISCONNECTED = 'disconnected';
@@ -227,13 +259,13 @@ var Client = function (options) {
   if (timeout) {
     self._timeout = timeout;
   } else {
-    self._timeout = 10000;
+    self._timeout = 10000; // 事件注册超时
   }
 
-  self._subscriptionMap = {};
-  self._commandMap = {};
-  self._pendingBuffer = [];
-  self._pendingSubscriptionBuffer = [];
+  self._subscriptionMap = {};           // 已经注册 通道名:状态
+  self._commandMap = {};                // 监视超时的 command
+  self._pendingBuffer = [];             // 普通消息
+  self._pendingSubscriptionBuffer = []; // 等待注册的消息
 
   self.connectAttempts = 0;
   self.pendingReconnect = false;
@@ -242,19 +274,22 @@ var Client = function (options) {
   self._socket = new ComSocket();
 
   self._socket.on('error', function (err) {
-    var isConnectionFailure = err.code == 'ENOENT' || err.code == 'ECONNREFUSED';
+    var isConnectionFailure = err.code === 'ENOENT' || err.code === 'ECONNREFUSED';
     var isBelowRetryThreshold = self.connectAttempts < self.connectRetryErrorThreshold;
 
     // We can tolerate a few missed reconnections without emitting a full error.
-    if (isConnectionFailure && isBelowRetryThreshold && err.address == options.socketPath) {
+    if (isConnectionFailure && isBelowRetryThreshold && err.address === options.socketPath) {
       self.emit('warning', err);
     } else {
       self.emit('error', err);
     }
   });
 
+  // This allows you to batch multiple messages together when passing them across
+  // message brokers. This may improve the efficiency of your pub/sub operations.
+  // This value is in milliseconds. 5 is generally a safe value to set this to.
   if (options.pubSubBatchDuration != null) {
-    self._socket.batchDuration = options.pubSubBatchDuration;
+    self._socket.batchDuration = options.pubSubBatchDuration; // 批量发送最大等待时间
   }
 
   self._curID = 1;
@@ -262,6 +297,11 @@ var Client = function (options) {
 
   self.setMaxListeners(0);
 
+  /**
+   * 重连
+   * @param initialDelay
+   * @private
+   */
   self._tryReconnect = function (initialDelay) {
     var exponent = self.connectAttempts++;
     var reconnectOptions = self.autoReconnectOptions;
@@ -309,16 +349,29 @@ var Client = function (options) {
     self._pendingBuffer = [];
   };
 
+  /**
+   * 发送等待中的 command
+   * @private
+   */
   self._flushPendingBuffersIfConnected = function () {
-    if (self.state == self.CONNECTED) {
+    if (self.state === self.CONNECTED) {
       self._flushPendingBuffers();
     }
   };
 
+  /**
+   * 监听注册超时
+   * @param command
+   * @param callback
+   * @private
+   */
   self._prepareAndTrackCommand = function (command, callback) {
     command.id = self._genID();
     if (callback) {
-      var request = {callback: callback, command: command};
+      var request = {
+        callback: callback,
+        command: command
+      };
       self._commandMap[command.id] = request;
 
       request.timeout = setTimeout(function () {
@@ -332,6 +385,13 @@ var Client = function (options) {
     }
   };
 
+  /**
+   * 准备发送 subscribe 请求
+   * @param command
+   * @param callback
+   * @param options
+   * @private
+   */
   self._bufferSubscribeCommand = function (command, callback, options) {
     self._prepareAndTrackCommand(command, callback);
     // Clone the command argument to prevent the user from modifying the data
@@ -343,6 +403,13 @@ var Client = function (options) {
     self._pendingSubscriptionBuffer.push(commandData);
   };
 
+  /**
+   * 普通请求
+   * @param command
+   * @param callback
+   * @param options
+   * @private
+   */
   self._bufferCommand = function (command, callback, options) {
     self._prepareAndTrackCommand(command, callback);
     // Clone the command argument to prevent the user from modifying the data
@@ -356,7 +423,13 @@ var Client = function (options) {
 
   // Recovers subscriptions after Broker server crash
   self._resubscribeAll = function () {
+    // 如果注册失败只抛出一个错误
     var hasFailed = false;
+    /**
+     * 监听注册失败
+     * @param channel
+     * @param err
+     */
     var handleResubscribe = function (channel, err) {
       if (err) {
         if (!hasFailed) {
@@ -373,28 +446,41 @@ var Client = function (options) {
     }
   };
 
+  /**
+   * 成功连接时发送 init command
+   * @private
+   */
   self._connectHandler = function () {
     var command = {
       action: 'init',
       secretKey: secretKey
     };
+    /**
+     * 监视 init command 执行, 失败发送 error 事件, 成功回复注册所有通道
+     * @param err
+     * @param brokerInfo
+     */
     var initHandler = function (err, brokerInfo) {
       if (err) {
         self.emit('error', err);
       } else {
         self.state = self.CONNECTED;
         self.connectAttempts = 0;
-        self._resubscribeAll();
+        self._resubscribeAll(); // 回复注册所有通道
         self._flushPendingBuffers();
         self.emit('ready', brokerInfo);
       }
     };
     self._prepareAndTrackCommand(command, initHandler);
-    self._execCommand(command);
+    self._execCommand(command); // 发送请求到远程
   };
 
+  /**
+   * 确保已经连接了
+   * @private
+   */
   self._connect = function () {
-    if (self.state == self.DISCONNECTED) {
+    if (self.state === self.DISCONNECTED) {
       self.pendingReconnect = false;
       self.pendingReconnectTimeout = null;
       clearTimeout(self._reconnectTimeoutRef);
@@ -423,6 +509,9 @@ var Client = function (options) {
   self._socket.on('close', handleDisconnection);
   self._socket.on('end', handleDisconnection);
 
+  /**
+   * ncom 返回的 message 消息, 本地数据写到远程后, 远程返回 message 消息.
+   */
   self._socket.on('message', function (response) {
     var id = response.id;
     var rawError = response.error;
@@ -430,7 +519,8 @@ var Client = function (options) {
     if (rawError != null) {
       error = scErrors.hydrateError(rawError, true);
     }
-    if (response.type == 'response') {
+
+    if (response.type === 'response') {
       if (self._commandMap.hasOwnProperty(id)) {
         clearTimeout(self._commandMap[id].timeout);
         var action = response.action;
@@ -444,19 +534,25 @@ var Client = function (options) {
           callback(error);
         }
       }
-    } else if (response.type == 'message') {
+    } else if (response.type === 'message') {
       self.emit('message', response.channel, response.value);
     }
   });
 
   self._connect();
 
+  /**
+   * 发送消息到 server
+   * @param command
+   * @param options
+   * @private
+   */
   self._execCommand = function (command, options) {
     self._socket.write(command, options);
   };
 
-  self.isConnected = function() {
-    return self.state == self.CONNECTED;
+  self.isConnected = function () {
+    return self.state === self.CONNECTED;
   };
 
   self.extractKeys = function (object) {
@@ -481,6 +577,12 @@ var Client = function (options) {
     return execOptions;
   };
 
+  /**
+   *
+   * @param channel       channel 名称
+   * @param [ackCallback] 注册回调, 不监听 subscribe 事件就传递回调函数
+   * @param force         重新注册?
+   */
   self.subscribe = function (channel, ackCallback, force) {
     if (!force && self.isSubscribed(channel)) {
       ackCallback && ackCallback();
@@ -491,6 +593,10 @@ var Client = function (options) {
         channel: channel,
         action: 'subscribe'
       };
+      /**
+       * 监听注册结果抛出事件
+       * @param err
+       */
       var callback = function (err) {
         if (err) {
           ackCallback && ackCallback(err);
@@ -509,10 +615,15 @@ var Client = function (options) {
     }
   };
 
+  /**
+   * 取消订阅
+   * @param channel
+   * @param ackCallback
+   */
   self.unsubscribe = function (channel, ackCallback) {
     // No need to unsubscribe if the server is disconnected
     // The server cleans up automatically in case of disconnection
-    if (self.isSubscribed(channel) && self.state == self.CONNECTED) {
+    if (self.isSubscribed(channel) && self.state === self.CONNECTED) {
       delete self._subscriptionMap[channel];
 
       var command = {
@@ -538,6 +649,11 @@ var Client = function (options) {
     }
   };
 
+  /**
+   * 返回所有订阅数组
+   * @param includePending 是否包括尚未注册成功的 channel
+   * @return {*}
+   */
   self.subscriptions = function (includePending) {
     var allSubs = Object.keys(self._subscriptionMap || {});
     if (includePending) {
@@ -547,7 +663,7 @@ var Client = function (options) {
     var len = allSubs.length;
     for (var i = 0; i < len; i++) {
       var sub = allSubs[i];
-      if (self._subscriptionMap[sub] == 'subscribed') {
+      if (self._subscriptionMap[sub] === 'subscribed') {
         activeSubs.push(sub);
       }
     }
@@ -558,9 +674,15 @@ var Client = function (options) {
     if (includePending) {
       return !!self._subscriptionMap[channel];
     }
-    return self._subscriptionMap[channel] == 'subscribed';
+    return self._subscriptionMap[channel] === 'subscribed';
   };
 
+  /**
+   * 发送消息
+   * @param channel  通道名称
+   * @param value    消息
+   * @param callback 监听发送结果
+   */
   self.publish = function (channel, value, callback) {
     var command = {
       action: 'publish',
@@ -574,6 +696,11 @@ var Client = function (options) {
     self._flushPendingBuffersIfConnected();
   };
 
+  /**
+   * 发送数据?
+   * @param data
+   * @param callback
+   */
   self.send = function (data, callback) {
     var command = {
       action: 'send',
@@ -1094,6 +1221,7 @@ var Client = function (options) {
           disconnectCallback();
         }
       }
+
       var setDisconnectStatus = function () {
         self._socket.removeListener('end', setDisconnectStatus);
         self.state = self.DISCONNECTED;
