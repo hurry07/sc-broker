@@ -13,7 +13,7 @@ class BrokerControllerStub extends SCBroker {
         process.exit();
       } else {
         if (data.brokerTest) {
-          if (data.brokerTest == 'test1') {
+          if (data.brokerTest === 'test1') {
             self.sendToMaster({
               brokerSubject: 'there'
             }, function (err, data) {
@@ -23,7 +23,7 @@ class BrokerControllerStub extends SCBroker {
                 data: data
               });
             });
-          } else if (data.brokerTest == 'test2') {
+          } else if (data.brokerTest === 'test2') {
             self.sendToMaster({
               sendBackError: true
             }, function (err, data) {
@@ -33,7 +33,7 @@ class BrokerControllerStub extends SCBroker {
                 data: data
               });
             });
-          } else if (data.brokerTest == 'test3') {
+          } else if (data.brokerTest === 'test3') {
             self.sendToMaster({
               doNothing: true
             }, function (err, data) {
@@ -43,7 +43,7 @@ class BrokerControllerStub extends SCBroker {
                 data: data
               });
             });
-          } else if (data.brokerTest == 'test4') {
+          } else if (data.brokerTest === 'test4') {
             self.sendToMaster({
               doNothing: true
             });

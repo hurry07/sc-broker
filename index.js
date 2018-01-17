@@ -203,6 +203,12 @@ module.exports.createServer = function (options) {
 // --------------------------
 /**
  * 连接远程
+ * options: {
+ *   socketPath: '/var/folders/fy/wwy4nh_j3wj8d5cx9h0nc57w0000gn/T/socketcluster/b037644f-7af9_42aa7f892f/b0',
+ *   secretKey: '24804ae6648bbdd5ab0fae8b1e1f180624aaa6b46cd6dbff6178f8c43ada8708',
+ *   pubSubBatchDuration: null,
+ *   connectRetryErrorThreshold: null
+ * }
  * @param options
  * @constructor
  */
@@ -271,6 +277,7 @@ var Client = function (options) {
   self.pendingReconnect = false;
   self.pendingReconnectTimeout = null;
 
+  // socket 通过连接到 IPC path 进行通信
   self._socket = new ComSocket();
 
   self._socket.on('error', function (err) {

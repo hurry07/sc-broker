@@ -1,3 +1,13 @@
+/**
+ * { id: 0,
+    debug: null,
+    socketPath: '/var/folders/fy/wwy4nh_j3wj8d5cx9h0nc57w0000gn/T/socketcluster/c1cdf44c-9384_42aa7f892f/b0',
+    expiryAccuracy: 5000,
+    downgradeToUser: false,
+    brokerControllerPath: '/Users/jie/workspace/bmm-cloud/scc/broker.js',
+    processTermTimeout: 10000
+    }
+ */
 var args = JSON.parse(process.argv[2]);
 
 var PORT;
@@ -474,6 +484,27 @@ var actions = {
     }, pubSubOptions);
   },
 
+  /**
+   * {
+      "action": "publish",
+      "channel": "file-client:connections",
+      "value": {
+        "sender": "5ba9d866-bf11-4cdf-bb0e-e03eb59926cd",
+        "messages": [
+          {
+            "hostname": "127.0.0.1",
+            "port": 8300,
+            "pid": 34044,
+            "connections": 0
+          }
+        ],
+        "id": "1b0bc5eb-a5ee-4321-8d40-b2daabb7ad9d"
+      },
+      "id": "n19"
+    }
+   * @param command
+   * @param socket
+   */
   publish: function (command, socket) {
     scBroker.publish(command.channel, command.value);
     var response = {id: command.id, type: 'response', action: 'publish', channel: command.channel};
@@ -592,8 +623,10 @@ var comServerListen = function () {
 
 process.on('message', function (m) {
   if (m) {
+    // 接受主线程发送的消息,
     if (m.type === 'masterMessage') {
       if (scBroker) {
+        // 如果成功执行, 返回消息给主线程
         scBroker.emit('masterMessage', m.data, function (err, data) {
           if (m.cid) {
             process.send({
